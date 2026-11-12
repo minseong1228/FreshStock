@@ -155,3 +155,49 @@ def test_expired_lot_auto_disposal_is_once():
         assert db.execute("SELECT stock FROM ingredients WHERE id=2").fetchone()[0]==0
         assert db.execute("SELECT count(*) FROM stock_movements WHERE reason='DISPOSE' AND ingredient_id=2").fetchone()[0]==1
         assert db.execute("SELECT remaining FROM inventory_lots WHERE ingredient_id=2").fetchone()[0]==0
+
+
+def usage(amount=1, policy='FIFO', key=None):
+    with TestClient(app) as client:
+        return client.post('/api/usages', headers={'Idempotency-Key':str(key or uuid4())}, json={'ingredient_id':1,'amount':amount,'policy':policy})
+
+def test_usage_idempotency_cancel_and_restore():
+    before=state()[0]; key=uuid4()
+    first=usage(200,key=key); assert first.status_code==201
+    again=usage(200,key=key); assert again.json()['id']==first.json()['id']
+    assert usage(201,key=key).status_code==409
+    with TestClient(app) as client:
+        assert client.post(f"/api/usages/{first.json()['id']}/cancel").status_code==200
+        assert client.post(f"/api/usages/{first.json()['id']}/cancel").status_code==409
+    assert state()[0]==before
+
+def test_concurrent_usage_does_not_overdraw():
+    with psycopg.connect(URL) as db:
+        db.execute('UPDATE ingredients SET stock=100 WHERE id=1')
+        db.execute('UPDATE inventory_lots SET remaining=100 WHERE ingredient_id=1')
+    with ThreadPoolExecutor(max_workers=2) as pool: results=list(pool.map(lambda _: usage(70),range(2)))
+    assert sorted(r.status_code for r in results)==[201,409]
+    assert dict(state()[0])[1]==30
+
+def test_usage_fefo_and_fifo_choose_distinct_lots():
+    with psycopg.connect(URL) as db:
+        db.execute("UPDATE inventory_lots SET received_at=now()-interval '2 days',expires_on=(now() AT TIME ZONE 'Asia/Seoul')::date+30 WHERE ingredient_id=1")
+        later=db.execute("INSERT INTO inventory_lots(ingredient_id,received_at,expires_on,location,initial_amount,remaining) VALUES (1,now()-interval '1 day',(now() AT TIME ZONE 'Asia/Seoul')::date+2,'냉장',100,100) RETURNING id").fetchone()[0]
+        db.execute('UPDATE ingredients SET stock=stock+100 WHERE id=1')
+    first=usage(50,'FEFO'); assert first.status_code==201
+    second=usage(50,'FIFO'); assert second.status_code==201
+    with psycopg.connect(URL) as db:
+        fefo=db.execute('SELECT lot_id FROM usage_lot_allocations WHERE usage_id=%s',(first.json()['id'],)).fetchone()[0]
+        fifo=db.execute('SELECT lot_id FROM usage_lot_allocations WHERE usage_id=%s',(second.json()['id'],)).fetchone()[0]
+    assert fefo==later and fifo!=later
+
+def test_usage_failure_rolls_back_all_changes():
+    with psycopg.connect(URL) as db:
+        db.execute("CREATE FUNCTION fail_use() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.reason='USE' THEN RAISE EXCEPTION 'injected'; END IF; RETURN NEW; END $$")
+        db.execute('CREATE TRIGGER injected_use BEFORE INSERT ON stock_movements FOR EACH ROW EXECUTE FUNCTION fail_use()')
+    before=state()
+    with pytest.raises(psycopg.Error): usage(100)
+    assert state()==before
+    with psycopg.connect(URL) as db:
+        assert db.execute('SELECT count(*) FROM stock_usages').fetchone()[0]==0
+        assert db.execute('SELECT count(*) FROM usage_lot_allocations').fetchone()[0]==0
