@@ -32,7 +32,7 @@ async def lifespan(app):
         try: await task
         except asyncio.CancelledError: pass
 app = FastAPI(title="FreshStock API", lifespan=lifespan)
-origins = ["http://localhost:5173", "http://127.0.0.1:5173"] + [x.strip() for x in os.getenv("CORS_ORIGINS", "").split(",") if x.strip()]
+origins = ["http://localhost:5173", "http://127.0.0.1:5173", "https://freshstock-ingredients.web.app", "https://freshstock-ingredients.firebaseapp.com"] + [x.strip() for x in os.getenv("CORS_ORIGINS", "").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"])
 
 def connect():

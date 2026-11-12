@@ -15,3 +15,7 @@ Docker Desktop 실행 후 프로젝트 폴더에서 `docker compose up --build`�
 테스트는 **별도 테스트 DB를 초기화**하므로 실제 DB를 지정하지 마세요. `TEST_DATABASE_URL`을 전용 테스트 DB 주소로 지정한 후 backend 디렉터리에서 `python -m pytest tests/test_transactions.py -q`를 실행합니다. 동시 사용, 중복 요청, 취소 복구, FIFO·FEFO 선택을 포함합니다.
 
 로그인 및 권한 분리가 없으므로 공개 서비스에는 가상 데이터만 사용하세요. 기존 메뉴·주문·수령 시간 API와 데이터는 과거 기록을 보존하기 위해 DB에 남아 있으며 새 화면은 식재료 관리 기능에 집중합니다.
+
+## 공개 사이트 주소
+
+FreshStock 공개 주소는 https://freshstock-ingredients.web.app 입니다. 기존 Firebase 프로젝트 ID는 변경할 수 없어 관리 콘솔과 기본 호스팅 주소에는 이전 식별자가 남아 있습니다. 기존 데이터베이스와 연결을 유지하기 위해 Docker의 기존 DB 이름과 자격 증명, Render 백엔드 주소도 유지합니다. 새 사이트 배포에는 `firebase deploy --only hosting --config firebase.freshstock.json --project bentostock`을 사용합니다.
