@@ -7,9 +7,18 @@ CREATE TABLE orders (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, custome
 CREATE TABLE order_items (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, order_id bigint NOT NULL REFERENCES orders(id), menu_id bigint NOT NULL REFERENCES menus(id), quantity integer NOT NULL CHECK (quantity > 0), unit_price integer NOT NULL CHECK (unit_price >= 0), UNIQUE(order_id,menu_id));
 -- 주문 당시 재료 사용량을 보관하여 레시피 변경 후에도 정확히 복구한다.
 CREATE TABLE order_ingredients (order_id bigint NOT NULL REFERENCES orders(id), ingredient_id bigint NOT NULL REFERENCES ingredients(id), amount numeric(12,2) NOT NULL CHECK (amount > 0), PRIMARY KEY(order_id,ingredient_id));
-CREATE TABLE stock_movements (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ingredient_id bigint NOT NULL REFERENCES ingredients(id), order_id bigint REFERENCES orders(id), delta numeric(12,2) NOT NULL CHECK (delta <> 0), reason text NOT NULL CHECK (reason IN ('RECEIPT','ORDER','CANCEL')), created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE stock_movements (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ingredient_id bigint NOT NULL REFERENCES ingredients(id), order_id bigint REFERENCES orders(id), delta numeric(12,2) NOT NULL CHECK (delta <> 0), reason text NOT NULL CHECK (reason IN ('RECEIPT','ORDER','CANCEL','DISPOSE')), created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX idx_orders_created ON orders(created_at DESC);
 CREATE INDEX idx_orders_customer_created ON orders(customer_id,created_at DESC);
 CREATE INDEX idx_order_items_menu ON order_items(menu_id);
 CREATE INDEX idx_movements_ingredient_created ON stock_movements(ingredient_id,created_at DESC);
+CREATE TABLE inventory_lots (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ingredient_id bigint NOT NULL REFERENCES ingredients(id), received_at timestamptz NOT NULL DEFAULT now(), expires_on date, location text NOT NULL CHECK(length(trim(location)) > 0), initial_amount numeric(12,2) NOT NULL CHECK(initial_amount > 0), remaining numeric(12,2) NOT NULL CHECK(remaining >= 0 AND remaining <= initial_amount));
+ALTER TABLE stock_movements ADD COLUMN lot_id bigint REFERENCES inventory_lots(id);
+CREATE TABLE pickup_slots (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, starts_at timestamptz NOT NULL UNIQUE, ends_at timestamptz NOT NULL CHECK(ends_at > starts_at), capacity integer NOT NULL CHECK(capacity > 0), reserved integer NOT NULL DEFAULT 0 CHECK(reserved >= 0 AND reserved <= capacity));
+ALTER TABLE orders ADD COLUMN pickup_slot_id bigint REFERENCES pickup_slots(id);
+ALTER TABLE orders ADD COLUMN allocation_policy text NOT NULL DEFAULT 'FIFO' CHECK (allocation_policy IN ('FIFO','FEFO'));
+CREATE TABLE order_lot_allocations (order_id bigint NOT NULL REFERENCES orders(id), lot_id bigint NOT NULL REFERENCES inventory_lots(id), amount numeric(12,2) NOT NULL CHECK(amount > 0), PRIMARY KEY(order_id,lot_id));
+CREATE INDEX idx_inventory_lots_fifo ON inventory_lots(ingredient_id,received_at,id) WHERE remaining > 0;
+CREATE INDEX idx_inventory_lots_expiry ON inventory_lots(expires_on) WHERE remaining > 0;
+CREATE INDEX idx_orders_slot ON orders(pickup_slot_id);
 COMMIT;

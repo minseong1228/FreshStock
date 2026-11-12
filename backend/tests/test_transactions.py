@@ -28,7 +28,7 @@ def state():
 
 def order(q=1, key=None):
     with TestClient(app) as client:
-        return client.post('/api/orders',headers={'Idempotency-Key':str(key or uuid4())},json={'customer_id':1,'items':[{'menu_id':1,'quantity':q}]})
+        return client.post('/api/orders',headers={'Idempotency-Key':str(key or uuid4())},json={'customer_id':1,'pickup_slot_id':1,'items':[{'menu_id':1,'quantity':q}]})
 
 def test_order_cancel_and_repeat():
     before=state()
@@ -42,7 +42,7 @@ def test_insufficient_stock_rolls_back():
     before=state(); assert order(100).status_code==409; assert state()==before
 
 def test_concurrent_last_stock():
-    with psycopg.connect(URL) as db: db.execute('UPDATE ingredients SET stock=150 WHERE id=2')
+    with psycopg.connect(URL) as db: db.execute('UPDATE ingredients SET stock=150 WHERE id=2'); db.execute('UPDATE inventory_lots SET remaining=150 WHERE ingredient_id=2')
     before=state()
     with ThreadPoolExecutor(max_workers=2) as pool: results=list(pool.map(lambda _: order(),range(2)))
     assert sorted(r.status_code for r in results)==[201,409]
@@ -78,7 +78,7 @@ def test_recipe_update_and_ingredient():
         ingredient=r.json()['id']
         assert c.put('/api/menus/1/recipe',json={'items':[{'ingredient_id':ingredient,'amount':1}]}).status_code==200
         assert order().status_code==409
-        assert c.post(f'/api/ingredients/{ingredient}/receipts',json={'amount':3}).status_code==200
+        assert c.post(f'/api/ingredients/{ingredient}/receipts',json={'amount':3,'expires_on':'2099-12-31','location':'냉장고'}).status_code==200
         assert order().status_code==201
 
 
@@ -95,3 +95,63 @@ def test_connection_termination_rolls_back():
     finally:
         conn.close()
     assert state()==before
+
+
+def test_fifo_excludes_expired_and_cancel_restores_lots():
+    with psycopg.connect(URL) as db:
+        db.execute("UPDATE inventory_lots SET remaining=0 WHERE ingredient_id=2")
+        db.execute("UPDATE ingredients SET stock=310 WHERE id=2")
+        db.execute("INSERT INTO inventory_lots(ingredient_id,received_at,expires_on,location,initial_amount,remaining) VALUES (2,now()-interval '3 days',(now() AT TIME ZONE 'Asia/Seoul')::date-1,'냉장',10,10),(2,now()-interval '2 days',(now() AT TIME ZONE 'Asia/Seoul')::date+3,'냉장',100,100),(2,now()-interval '1 day',(now() AT TIME ZONE 'Asia/Seoul')::date+1,'냉장',200,200)")
+    r=order(); assert r.status_code==201
+    with psycopg.connect(URL) as db:
+        rows=db.execute("SELECT remaining FROM inventory_lots WHERE ingredient_id=2 AND initial_amount IN (10,100,200) ORDER BY received_at").fetchall()
+        assert [x[0] for x in rows]==[0,0,150]
+    with TestClient(app) as c: assert c.post(f"/api/orders/{r.json()['id']}/cancel").status_code==200
+    with psycopg.connect(URL) as db:
+        rows=db.execute("SELECT remaining FROM inventory_lots WHERE ingredient_id=2 AND initial_amount IN (10,100,200) ORDER BY received_at").fetchall()
+        assert [x[0] for x in rows]==[0,100,200]
+
+def test_concurrent_slot_capacity():
+    with psycopg.connect(URL) as db: db.execute('UPDATE pickup_slots SET capacity=1 WHERE id=1')
+    with ThreadPoolExecutor(max_workers=2) as pool: results=list(pool.map(lambda _: order(),range(2)))
+    assert sorted(r.status_code for r in results)==[201,409]
+    with psycopg.connect(URL) as db: assert db.execute('SELECT reserved FROM pickup_slots WHERE id=1').fetchone()[0]==1
+
+def test_expired_stock_and_slot_cancel():
+    with psycopg.connect(URL) as db: db.execute("UPDATE inventory_lots SET expires_on=(now() AT TIME ZONE 'Asia/Seoul')::date-1 WHERE ingredient_id=2")
+    assert order().status_code==409
+    with psycopg.connect(URL) as db:
+        assert db.execute('SELECT reserved FROM pickup_slots WHERE id=1').fetchone()[0]==0
+        db.execute("UPDATE inventory_lots SET remaining=initial_amount,expires_on=(now() AT TIME ZONE 'Asia/Seoul')::date+1 WHERE ingredient_id=2"); db.execute("UPDATE ingredients SET stock=3000 WHERE id=2")
+    r=order();assert r.status_code==201
+    with TestClient(app) as c: assert c.post(f"/api/orders/{r.json()['id']}/cancel").status_code==200
+    with psycopg.connect(URL) as db: assert db.execute('SELECT reserved FROM pickup_slots WHERE id=1').fetchone()[0]==0
+
+
+def test_fefo_uses_earliest_expiry_and_cancel_restores():
+    with psycopg.connect(URL) as db:
+        db.execute("UPDATE inventory_lots SET remaining=0 WHERE ingredient_id=2")
+        db.execute("UPDATE ingredients SET stock=300 WHERE id=2")
+        db.execute("INSERT INTO inventory_lots(ingredient_id,received_at,expires_on,location,initial_amount,remaining) VALUES (2,now()-interval '2 days',(now() AT TIME ZONE 'Asia/Seoul')::date+10,'냉장',150,150),(2,now()-interval '1 day',(now() AT TIME ZONE 'Asia/Seoul')::date+2,'냉장',150,150)")
+    with TestClient(app) as c:
+        r=c.post('/api/orders',headers={'Idempotency-Key':str(uuid4())},json={'customer_id':1,'pickup_slot_id':1,'allocation_policy':'FEFO','items':[{'menu_id':1,'quantity':1}]})
+        assert r.status_code==201 and r.json()['allocation_policy']=='FEFO'
+        with psycopg.connect(URL) as db:
+            rows=db.execute("SELECT remaining FROM inventory_lots WHERE ingredient_id=2 AND initial_amount=150 ORDER BY received_at").fetchall()
+            assert [x[0] for x in rows]==[150,0]
+        assert c.post(f"/api/orders/{r.json()['id']}/cancel").status_code==200
+    with psycopg.connect(URL) as db:
+        rows=db.execute("SELECT remaining FROM inventory_lots WHERE ingredient_id=2 AND initial_amount=150 ORDER BY received_at").fetchall()
+        assert [x[0] for x in rows]==[150,150]
+
+
+def test_expired_lot_auto_disposal_is_once():
+    with psycopg.connect(URL) as db:
+        db.execute("UPDATE inventory_lots SET expires_on=(now() AT TIME ZONE 'Asia/Seoul')::date-1 WHERE ingredient_id=2")
+    with TestClient(app) as c:
+        assert c.get('/api/ingredients').status_code==200
+        assert c.get('/api/ingredients').status_code==200
+    with psycopg.connect(URL) as db:
+        assert db.execute("SELECT stock FROM ingredients WHERE id=2").fetchone()[0]==0
+        assert db.execute("SELECT count(*) FROM stock_movements WHERE reason='DISPOSE' AND ingredient_id=2").fetchone()[0]==1
+        assert db.execute("SELECT remaining FROM inventory_lots WHERE ingredient_id=2").fetchone()[0]==0

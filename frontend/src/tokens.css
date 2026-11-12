@@ -1,0 +1,17 @@
+:root {
+  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px; --space-lg: 24px; --space-xl: 40px; --space-2xl: 64px; --space-3xl: 96px; --space-4xl: 144px;
+  --text-xs: 0.75rem; --text-sm: 0.875rem; --text-md: 1rem; --text-lg: 1.2rem; --text-xl: 1.44rem; --text-2xl: 1.728rem; --text-3xl: 2.074rem;
+  --text-display-s: 1.44rem; --text-display: 1.728rem; --text-section: 1.2rem; --text-title: 1rem; --text-lead: 1rem;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1); --ease-in: cubic-bezier(0.7, 0, 0.84, 0); --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms; --dur-short: 220ms; --dur-long: 420ms;
+  --color-error: oklch(52% 0.19 27); --color-success: oklch(50% 0.12 150);
+  --container: 1120px; --gutter: 64px; --gap-columns: 32px; --section-gap-s: 120px; --section-gap: 144px; --section-gap-l: 176px;
+  --z-base: 1; --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-sticky-nav: 300; --z-modal: 400; --z-toast: 500; --z-tooltip: 600;
+  --color-paper: #f5f8fc; --color-paper-2: #ffffff; --color-paper-3: #eaf2fd;
+  --color-ink: #1c3049; --color-ink-2: #405773; --color-muted: #657994;
+  --color-rule: #dce6f2;
+  --color-accent: #3869b4; --color-accent-ink: #ffffff; --color-focus: #3869b4;
+  --font-display: "Gowun Dodum", "Noto Sans KR", system-ui, sans-serif; --font-body: "Gowun Dodum", "Noto Sans KR", system-ui, sans-serif; --font-outlier: var(--font-body);
+  --color-texture: #ffffff0c; --color-texture-light: #305b3410; --color-hero: #274f91; --color-hero-copy: #fffdf4; --color-hero-muted: #dce8f7; --color-mint: #e0edff; --color-warm: #eaf2fc; --color-soft: #eaf2fd; --color-chick: #f9df92; --color-chick-shadow: #f2d180; --color-outline: #756246; --color-foot: #dda86a; --color-cheek: #eeb7a1; --color-beak: #cd8957; --color-warning: #975128; --color-warning-bg: #fff0df; --color-shadow: #345a8a15; --radius-card: 20px; --radius-pill: 999px; --rule-hair: 1px; --shadow-card: none;
+  --metal-light: #ffffff; --metal-mid: #eaf2fd; --metal-shadow: #cfdef1; --metal-line: #9db7d9; --metal-shine: #ffffff99; --metal-grain: #3a619308; --tracking-display: -0.02em;
+}

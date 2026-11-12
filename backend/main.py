@@ -1,11 +1,16 @@
 import os
 import hashlib
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from starlette.concurrency import run_in_threadpool
 import json
 from uuid import UUID
 from collections import defaultdict
 from decimal import Decimal
-from datetime import date
-from typing import Annotated
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+from typing import Annotated, Literal
 import psycopg
 from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException, Query, Header
@@ -13,18 +18,44 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://bento:bento@localhost:5432/bentostock")
-app = FastAPI(title="BentoStock API")
+@asynccontextmanager
+async def lifespan(app):
+    async def expiry_worker():
+        while True:
+            await asyncio.sleep(60)
+            try: await run_in_threadpool(dispose_expired)
+            except Exception: logging.exception("유통기한 경과 재고 자동 정리 실패")
+    task=asyncio.create_task(expiry_worker())
+    try: yield
+    finally:
+        task.cancel()
+        try: await task
+        except asyncio.CancelledError: pass
+app = FastAPI(title="BentoStock API", lifespan=lifespan)
 origins = ["http://localhost:5173", "http://127.0.0.1:5173"] + [x.strip() for x in os.getenv("CORS_ORIGINS", "").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"])
 
 def connect():
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
+def dispose_expired():
+    """한국 날짜로 기한이 지난 로트를 원자적으로 폐기. 서버 중단 중에는 동작하지 않는다."""
+    with connect() as db:
+        ids=db.execute("SELECT id FROM ingredients WHERE id IN (SELECT ingredient_id FROM inventory_lots WHERE remaining>0 AND expires_on < (now() AT TIME ZONE 'Asia/Seoul')::date) ORDER BY id FOR UPDATE").fetchall()
+        for row in ids:
+            lots=db.execute("SELECT id,remaining FROM inventory_lots WHERE ingredient_id=%s AND remaining>0 AND expires_on < (now() AT TIME ZONE 'Asia/Seoul')::date ORDER BY received_at,id FOR UPDATE",(row['id'],)).fetchall()
+            for lot in lots:
+                db.execute("UPDATE inventory_lots SET remaining=0 WHERE id=%s",(lot['id'],))
+                db.execute("UPDATE ingredients SET stock=stock-%s WHERE id=%s",(lot['remaining'],row['id']))
+                db.execute("INSERT INTO stock_movements(ingredient_id,lot_id,delta,reason) VALUES (%s,%s,%s,'DISPOSE')",(row['id'],lot['id'],-lot['remaining']))
+
 class Item(BaseModel):
     menu_id: int = Field(gt=0)
     quantity: int = Field(gt=0, le=1000)
 class OrderIn(BaseModel):
     customer_id: int = Field(gt=0)
+    pickup_slot_id: int = Field(gt=0)
+    allocation_policy: Literal["FIFO", "FEFO"] = "FIFO"
     items: list[Item] = Field(min_length=1, max_length=50)
 class MenuIn(BaseModel):
     name: str = Field(min_length=1, max_length=100, pattern=r".*\S.*")
@@ -32,6 +63,16 @@ class MenuIn(BaseModel):
     active: bool = True
 class Receipt(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    expires_on: date
+    location: str = Field(min_length=1, max_length=100, pattern=r".*\S.*")
+class LotDetails(BaseModel):
+    expires_on: date
+    location: str = Field(min_length=1, max_length=100, pattern=r".*\S.*")
+class SlotIn(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+    capacity: int = Field(gt=0, le=100000)
+
 
 class IngredientIn(BaseModel):
     name: str = Field(min_length=1, max_length=100, pattern=r".*\S.*")
@@ -85,24 +126,50 @@ def update_menu(menu_id: int, data: MenuIn):
     except psycopg.errors.UniqueViolation: raise HTTPException(409,"이미 존재하는 메뉴입니다.")
 @app.get("/api/ingredients")
 def ingredients():
-    with connect() as db: return db.execute("SELECT *, stock <= threshold AS low FROM ingredients ORDER BY id").fetchall()
+    dispose_expired()
+    with connect() as db:
+        return db.execute("""SELECT i.*, COALESCE(SUM(l.remaining) FILTER (WHERE l.expires_on >= (now() AT TIME ZONE 'Asia/Seoul')::date),0) usable_stock, COALESCE(SUM(l.remaining) FILTER (WHERE l.expires_on IS NULL),0) unknown_stock, COALESCE(SUM(l.remaining) FILTER (WHERE l.expires_on < (now() AT TIME ZONE 'Asia/Seoul')::date),0) expired_stock, COALESCE(SUM(l.remaining) FILTER (WHERE l.expires_on BETWEEN (now() AT TIME ZONE 'Asia/Seoul')::date AND (now() AT TIME ZONE 'Asia/Seoul')::date+3),0) expiring_stock, (COALESCE(SUM(l.remaining) FILTER (WHERE l.expires_on >= (now() AT TIME ZONE 'Asia/Seoul')::date),0) <= i.threshold) AS low FROM ingredients i LEFT JOIN inventory_lots l ON l.ingredient_id=i.id GROUP BY i.id ORDER BY i.id""").fetchall()
+@app.get("/api/ingredients/{ingredient_id}/lots")
+def lots(ingredient_id:int):
+    dispose_expired()
+    with connect() as db: return db.execute("SELECT *, CASE WHEN expires_on IS NULL THEN 'UNKNOWN' WHEN expires_on < (now() AT TIME ZONE 'Asia/Seoul')::date THEN 'EXPIRED' WHEN expires_on <= (now() AT TIME ZONE 'Asia/Seoul')::date+3 THEN 'EXPIRING' ELSE 'AVAILABLE' END status FROM inventory_lots WHERE ingredient_id=%s ORDER BY received_at,id",(ingredient_id,)).fetchall()
+@app.put("/api/lots/{lot_id}")
+def update_lot(lot_id:int,data:LotDetails):
+    with connect() as db:
+        lookup=db.execute("SELECT ingredient_id FROM inventory_lots WHERE id=%s",(lot_id,)).fetchone()
+        if not lookup: raise HTTPException(404,"입고 로트가 없습니다.")
+        db.execute("SELECT id FROM ingredients WHERE id=%s FOR UPDATE",(lookup['ingredient_id'],))
+        return db.execute("UPDATE inventory_lots SET expires_on=%s,location=%s WHERE id=%s RETURNING *",(data.expires_on,data.location.strip(),lot_id)).fetchone()
 @app.get("/api/ingredients/{ingredient_id}/movements")
 def movements(ingredient_id:int):
     with connect() as db: return db.execute("SELECT * FROM stock_movements WHERE ingredient_id=%s ORDER BY id DESC LIMIT 100",(ingredient_id,)).fetchall()
 @app.post("/api/ingredients/{ingredient_id}/receipts")
 def receipt(ingredient_id:int, data:Receipt):
+    if data.expires_on < datetime.now(ZoneInfo('Asia/Seoul')).date(): raise HTTPException(422,"지난 유통기한으로 입고할 수 없습니다.")
     with connect() as db:
         row=db.execute("UPDATE ingredients SET stock=stock+%s WHERE id=%s RETURNING *",(data.amount,ingredient_id)).fetchone()
         if not row: raise HTTPException(404,"재료가 없습니다.")
+        db.execute("INSERT INTO inventory_lots(ingredient_id,expires_on,location,initial_amount,remaining) VALUES (%s,%s,%s,%s,%s)",(ingredient_id,data.expires_on,data.location.strip(),data.amount,data.amount))
         db.execute("INSERT INTO stock_movements(ingredient_id,delta,reason) VALUES (%s,%s,'RECEIPT')",(ingredient_id,data.amount))
         return row
+@app.get("/api/pickup-slots")
+def pickup_slots():
+    with connect() as db: return db.execute("SELECT *,capacity-reserved AS available FROM pickup_slots WHERE starts_at > now() ORDER BY starts_at").fetchall()
+@app.post("/api/pickup-slots", status_code=201)
+def create_pickup_slot(data:SlotIn):
+    if data.starts_at.utcoffset() is None or data.ends_at.utcoffset() is None: raise HTTPException(422,"시간대가 포함된 시각을 입력하세요.")
+    if data.ends_at <= data.starts_at or data.starts_at <= datetime.now(ZoneInfo('UTC')): raise HTTPException(422,"시작과 종료 시각을 확인하세요.")
+    try:
+        with connect() as db: return db.execute("INSERT INTO pickup_slots(starts_at,ends_at,capacity) VALUES (%s,%s,%s) RETURNING *",(data.starts_at,data.ends_at,data.capacity)).fetchone()
+    except psycopg.errors.UniqueViolation: raise HTTPException(409,"같은 시작 시각의 시간대가 존재합니다.")
 
 @app.post("/api/orders", status_code=201)
 def create_order(data:OrderIn, idempotency_key: UUID = Header(alias="Idempotency-Key")):
+    dispose_expired()
     quantities=defaultdict(int)
     for item in data.items: quantities[item.menu_id]+=item.quantity
     if any(q > 1000 for q in quantities.values()): raise HTTPException(422,"메뉴별 수량은 1000 이하입니다.")
-    payload=json.dumps({'customer_id':data.customer_id,'items':sorted(quantities.items())},separators=(',',':'))
+    payload=json.dumps({'customer_id':data.customer_id,'pickup_slot_id':data.pickup_slot_id,'allocation_policy':data.allocation_policy,'items':sorted(quantities.items())},separators=(',',':'))
     digest=hashlib.sha256(payload.encode()).hexdigest()
     with connect() as db:
         key=str(idempotency_key)
@@ -112,6 +179,10 @@ def create_order(data:OrderIn, idempotency_key: UUID = Header(alias="Idempotency
             if previous['request_hash']!=digest: raise HTTPException(409,"같은 주문 키를 다른 내용에 사용할 수 없습니다.")
             return previous
         if not db.execute("SELECT 1 FROM customers WHERE id=%s",(data.customer_id,)).fetchone(): raise HTTPException(404,"고객이 없습니다.")
+        slot=db.execute("SELECT * FROM pickup_slots WHERE id=%s FOR UPDATE",(data.pickup_slot_id,)).fetchone()
+        if not slot or slot['starts_at'] <= datetime.now(ZoneInfo('UTC')): raise HTTPException(400,"수령 가능한 시간대가 아닙니다.")
+        total_units=sum(quantities.values())
+        if slot['reserved']+total_units > slot['capacity']: raise HTTPException(409,"해당 수령 시간의 생산 용량이 부족합니다.")
         # 메뉴 잠금은 가격/활성 상태 변경과 충돌하여 주문 시점의 가격을 보장한다.
         ids=sorted(quantities)
         menus=db.execute("SELECT * FROM menus WHERE id=ANY(%s) ORDER BY id FOR SHARE",(ids,)).fetchall()
@@ -122,9 +193,20 @@ def create_order(data:OrderIn, idempotency_key: UUID = Header(alias="Idempotency
         for r in recipes: needs[r['ingredient_id']] += r['amount'] * quantities[r['menu_id']]
         # 모든 주문과 취소가 재료 id 순서로 잠금: 교착 위험 최소화.
         stock=db.execute("SELECT id,name,stock FROM ingredients WHERE id=ANY(%s) ORDER BY id FOR UPDATE",(sorted(needs),)).fetchall()
+        lots=db.execute("SELECT * FROM inventory_lots WHERE ingredient_id=ANY(%s) AND remaining>0 AND expires_on >= GREATEST((now() AT TIME ZONE 'Asia/Seoul')::date, (%s::timestamptz AT TIME ZONE 'Asia/Seoul')::date) ORDER BY ingredient_id, CASE WHEN %s = 'FEFO' THEN expires_on END ASC, received_at, id FOR UPDATE",(sorted(needs),slot['starts_at'],data.allocation_policy)).fetchall()
+        available=defaultdict(Decimal)
+        for lot in lots: available[lot['ingredient_id']]+=lot['remaining']
         for row in stock:
-            if row['stock'] < needs[row['id']]: raise HTTPException(409,f"재고 부족: {row['name']}")
-        order=db.execute("INSERT INTO orders(customer_id,request_key,request_hash) VALUES (%s,%s,%s) RETURNING *",(data.customer_id,key,digest)).fetchone()
+            if available[row['id']] < needs[row['id']]: raise HTTPException(409,f"사용 가능한 재고 부족: {row['name']}")
+        db.execute("UPDATE pickup_slots SET reserved=reserved+%s WHERE id=%s",(total_units,data.pickup_slot_id))
+        order=db.execute("INSERT INTO orders(customer_id,request_key,request_hash,pickup_slot_id,allocation_policy) VALUES (%s,%s,%s,%s,%s) RETURNING *",(data.customer_id,key,digest,data.pickup_slot_id,data.allocation_policy)).fetchone()
+        left=dict(needs)
+        for lot in lots:
+            ingredient_id=lot['ingredient_id']; amount=min(left[ingredient_id],lot['remaining'])
+            if amount:
+                db.execute("UPDATE inventory_lots SET remaining=remaining-%s WHERE id=%s",(amount,lot['id']))
+                db.execute("INSERT INTO order_lot_allocations(order_id,lot_id,amount) VALUES (%s,%s,%s)",(order['id'],lot['id'],amount))
+                left[ingredient_id]-=amount
         for m in menus: db.execute("INSERT INTO order_items(order_id,menu_id,quantity,unit_price) VALUES (%s,%s,%s,%s)",(order['id'],m['id'],quantities[m['id']],m['price']))
         for ingredient_id, amount in sorted(needs.items()):
             db.execute("UPDATE ingredients SET stock=stock-%s WHERE id=%s",(amount,ingredient_id))
@@ -138,12 +220,24 @@ def cancel(order_id:int):
         order=db.execute("SELECT * FROM orders WHERE id=%s FOR UPDATE",(order_id,)).fetchone()
         if not order: raise HTTPException(404,"주문이 없습니다.")
         if order['status']!='CONFIRMED': raise HTTPException(409,"이미 취소된 주문입니다.")
+        if order['pickup_slot_id']:
+            db.execute("SELECT id FROM pickup_slots WHERE id=%s FOR UPDATE",(order['pickup_slot_id'],))
+            quantity=db.execute("SELECT COALESCE(sum(quantity),0) total FROM order_items WHERE order_id=%s",(order_id,)).fetchone()['total']
+            db.execute("UPDATE pickup_slots SET reserved=reserved-%s WHERE id=%s",(quantity,order['pickup_slot_id']))
         items=db.execute("SELECT ingredient_id,amount FROM order_ingredients WHERE order_id=%s ORDER BY ingredient_id",(order_id,)).fetchall()
         db.execute("SELECT id FROM ingredients WHERE id=ANY(%s) ORDER BY id FOR UPDATE",([x['ingredient_id'] for x in items],)).fetchall()
+        allocations=db.execute("SELECT a.lot_id,a.amount FROM order_lot_allocations a JOIN inventory_lots l ON l.id=a.lot_id WHERE a.order_id=%s ORDER BY l.ingredient_id,l.received_at,l.id FOR UPDATE OF l",(order_id,)).fetchall()
+        for allocation in allocations: db.execute("UPDATE inventory_lots SET remaining=remaining+%s WHERE id=%s",(allocation['amount'],allocation['lot_id']))
+        # 기존 주문에는 로트 이력이 없으므로 복구량을 확인 필요 로트로 기록한다.
+        if not allocations:
+            for x in items: db.execute("INSERT INTO inventory_lots(ingredient_id,location,initial_amount,remaining) VALUES (%s,'기존 주문 복구(유통기한 확인 필요)',%s,%s)",(x['ingredient_id'],x['amount'],x['amount']))
         for x in items:
             db.execute("UPDATE ingredients SET stock=stock+%s WHERE id=%s",(x['amount'],x['ingredient_id']))
             db.execute("INSERT INTO stock_movements(ingredient_id,order_id,delta,reason) VALUES (%s,%s,%s,'CANCEL')",(x['ingredient_id'],order_id,x['amount']))
-        return db.execute("UPDATE orders SET status='CANCELLED',cancelled_at=now() WHERE id=%s RETURNING *",(order_id,)).fetchone()
+        result=db.execute("UPDATE orders SET status='CANCELLED',cancelled_at=now() WHERE id=%s RETURNING *",(order_id,)).fetchone()
+    try: dispose_expired()
+    except Exception: logging.exception("취소 후 유통기한 경과 재고 정리 실패")
+    return result
 
 @app.get("/api/orders")
 def orders(customer_id:int|None=None, menu_id:int|None=None, status:str|None=None, start:date|None=None, end:date|None=None, limit:Annotated[int,Query(ge=1,le=100)]=20, offset:Annotated[int,Query(ge=0)]=0):
