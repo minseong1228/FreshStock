@@ -1,0 +1,11 @@
+BEGIN;
+CREATE TABLE ingredients (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name text NOT NULL UNIQUE CHECK(length(trim(name))>0), unit text NOT NULL CHECK(length(trim(unit))>0), stock numeric(12,2) NOT NULL DEFAULT 0 CHECK(stock>=0), threshold numeric(12,2) NOT NULL DEFAULT 0 CHECK(threshold>=0));
+CREATE TABLE inventory_lots (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ingredient_id bigint NOT NULL REFERENCES ingredients(id), received_at timestamptz NOT NULL DEFAULT now(), expires_on date, location text NOT NULL CHECK(length(trim(location))>0), initial_amount numeric(12,2) NOT NULL CHECK(initial_amount>0), remaining numeric(12,2) NOT NULL CHECK(remaining>=0 AND remaining<=initial_amount));
+CREATE TABLE stock_usages (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ingredient_id bigint NOT NULL REFERENCES ingredients(id), amount numeric(12,2) NOT NULL CHECK(amount>0), policy text NOT NULL CHECK(policy IN ('FIFO','FEFO')), request_key uuid NOT NULL UNIQUE, request_hash text NOT NULL, note text NOT NULL DEFAULT '', status text NOT NULL DEFAULT 'CONFIRMED' CHECK(status IN ('CONFIRMED','CANCELLED')), created_at timestamptz NOT NULL DEFAULT now(), cancelled_at timestamptz, CHECK((status='CANCELLED')=(cancelled_at IS NOT NULL)));
+CREATE TABLE usage_lot_allocations (usage_id bigint NOT NULL REFERENCES stock_usages(id), lot_id bigint NOT NULL REFERENCES inventory_lots(id), amount numeric(12,2) NOT NULL CHECK(amount>0), PRIMARY KEY(usage_id,lot_id));
+CREATE TABLE stock_movements (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ingredient_id bigint NOT NULL REFERENCES ingredients(id), lot_id bigint REFERENCES inventory_lots(id), usage_id bigint REFERENCES stock_usages(id), delta numeric(12,2) NOT NULL CHECK(delta<>0), reason text NOT NULL CHECK(reason IN ('RECEIPT','DISPOSE','USE','USE_CANCEL')), created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX idx_inventory_lots_fifo ON inventory_lots(ingredient_id,received_at,id) WHERE remaining>0;
+CREATE INDEX idx_inventory_lots_expiry ON inventory_lots(expires_on) WHERE remaining>0;
+CREATE INDEX idx_stock_usages_created ON stock_usages(created_at DESC,id DESC);
+CREATE INDEX idx_movements_ingredient_created ON stock_movements(ingredient_id,created_at DESC);
+COMMIT;
