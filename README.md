@@ -18,4 +18,4 @@ Docker Desktop 실행 후 프로젝트 폴더에서 `docker compose up --build`�
 
 ## 공개 사이트 주소
 
-FreshStock 공개 주소는 https://freshstock-ingredients.web.app 입니다. 기존 Firebase 프로젝트 ID는 변경할 수 없어 관리 콘솔과 기본 호스팅 주소에는 이전 식별자가 남아 있습니다. 기존 데이터베이스와 연결을 유지하기 위해 Docker의 기존 DB 이름과 자격 증명, Render 백엔드 주소도 유지합니다. 새 사이트 배포에는 `firebase deploy --only hosting --config firebase.freshstock.json --project bentostock`을 사용합니다.
+FreshStock 공개 주소는 https://freshstock-ingredients.web.app 입니다. 기존 Firebase 프로젝트 ID는 변경할 수 없어 관리 콘솔과 기본 호스팅 주소에는 이전 식별자가 남아 있습니다. 기존 데이터베이스와 연결을 유지하기 위해 Docker의 기존 프로젝트·DB 이름과 자격 증명, Render 백엔드 주소는 유지합니다. GitHub 저장소와 Render 서비스 표시 이름은 FreshStock입니다. 새 사이트 배포에는 `firebase deploy --only hosting --config firebase.freshstock.json --project bentostock`을 사용합니다.

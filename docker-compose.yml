@@ -1,3 +1,5 @@
+# Keep the existing Docker project and volume when the folder name changes.
+name: bentostock
 services:
   db:
     image: postgres:16
