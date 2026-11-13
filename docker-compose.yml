@@ -1,25 +1,26 @@
-# Keep the existing Docker project and volume when the folder name changes.
-name: bentostock
+name: freshstock
 services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_DB: bentostock
-      POSTGRES_USER: bento
-      POSTGRES_PASSWORD: bento
+      POSTGRES_DB: freshstock
+      POSTGRES_USER: freshstock
+      POSTGRES_PASSWORD: freshstock_local
     ports: ["5432:5432"]
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+      - freshstock_data:/var/lib/postgresql/data
+      - ./db/fresh_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/fresh_seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bento -d bentostock"]
+      test: ["CMD-SHELL", "pg_isready -U freshstock -d freshstock"]
       interval: 3s
       retries: 20
   api:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.fresh
     environment:
-      DATABASE_URL: postgresql://bento:bento@db:5432/bentostock
+      DATABASE_URL: postgresql://freshstock:freshstock_local@db:5432/freshstock
     ports: ["8000:8000"]
     depends_on:
       db: {condition: service_healthy}
@@ -28,4 +29,4 @@ services:
     ports: ["5173:5173"]
     depends_on: [api]
 volumes:
-  pgdata:
+  freshstock_data:

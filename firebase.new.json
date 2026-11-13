@@ -1,0 +1,7 @@
+{
+  "hosting": {
+    "public": "frontend/dist",
+    "ignore": ["firebase.new.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [{"source":"**", "destination":"/index.html"}]
+  }
+}
