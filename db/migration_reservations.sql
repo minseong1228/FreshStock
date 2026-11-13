@@ -1,0 +1,10 @@
+BEGIN;
+CREATE TABLE pickup_slots (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, starts_at timestamptz NOT NULL UNIQUE, ends_at timestamptz NOT NULL CHECK(ends_at>starts_at), capacity integer NOT NULL CHECK(capacity>0), reserved integer NOT NULL DEFAULT 0 CHECK(reserved>=0 AND reserved<=capacity));
+CREATE TABLE reservations (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, slot_id bigint NOT NULL REFERENCES pickup_slots(id), ingredient_id bigint NOT NULL REFERENCES ingredients(id), amount numeric(12,2) NOT NULL CHECK(amount>0), policy text NOT NULL CHECK(policy IN ('FIFO','FEFO')), note text NOT NULL DEFAULT '', request_key uuid NOT NULL UNIQUE, request_hash text NOT NULL, status text NOT NULL DEFAULT 'CONFIRMED' CHECK(status IN ('CONFIRMED','CANCELLED')), created_at timestamptz NOT NULL DEFAULT now(), cancelled_at timestamptz, CHECK((status='CANCELLED')=(cancelled_at IS NOT NULL)));
+CREATE TABLE reservation_lot_allocations (reservation_id bigint NOT NULL REFERENCES reservations(id), lot_id bigint NOT NULL REFERENCES inventory_lots(id), amount numeric(12,2) NOT NULL CHECK(amount>0), PRIMARY KEY(reservation_id,lot_id));
+ALTER TABLE stock_movements DROP CONSTRAINT stock_movements_reason_check;
+ALTER TABLE stock_movements ADD CONSTRAINT stock_movements_reason_check CHECK(reason IN ('RECEIPT','DISPOSE','USE','USE_CANCEL','RESERVE','RESERVE_CANCEL'));
+ALTER TABLE stock_movements ADD COLUMN reservation_id bigint REFERENCES reservations(id);
+CREATE INDEX idx_reservations_slot ON reservations(slot_id,status);
+CREATE INDEX idx_reservations_created ON reservations(created_at DESC,id DESC);
+COMMIT;
