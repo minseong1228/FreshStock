@@ -1,8 +1,0 @@
-{
-  "hosting": {
-    "site": "freshstock-ingredients",
-    "public": "frontend/dist",
-    "ignore": ["firebase.freshstock.json", "**/.*", "**/node_modules/**"],
-    "rewrites": [{"source": "**", "destination": "/index.html"}]
-  }
-}
