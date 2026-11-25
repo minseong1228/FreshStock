@@ -30,4 +30,4 @@
 
 
 .typing-line{display:inline-block;white-space:nowrap;vertical-align:bottom}
-@media(prefers-reduced-motion:no-preference){.typing-first{animation:type-reveal 1.25s steps(8,end) both}.typing-second{animation:type-reveal .9s steps(5,end) 1.25s both}@keyframes type-reveal{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}}
+@media(prefers-reduced-motion:no-preference){.typing-first{animation:type-reveal 1.4s linear both}.typing-second{animation:type-reveal 1s linear 1.4s both}@keyframes type-reveal{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}}
